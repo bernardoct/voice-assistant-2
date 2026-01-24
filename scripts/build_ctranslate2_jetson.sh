@@ -6,16 +6,27 @@ set -e
 
 echo "=== CTranslate2 Build Script for Jetson Orin Nano ==="
 
-# Check CUDA version
-echo "Checking CUDA installation..."
-if [ -f /usr/local/cuda/version.txt ]; then
-    cat /usr/local/cuda/version.txt
-elif command -v nvcc &> /dev/null; then
-    nvcc --version
-else
-    echo "ERROR: CUDA not found. Please install CUDA toolkit."
+# Find CUDA installation
+CUDA_PATH=""
+for cuda_dir in /usr/local/cuda-12.6 /usr/local/cuda-12 /usr/local/cuda; do
+    if [ -d "$cuda_dir" ] && [ -f "$cuda_dir/bin/nvcc" ]; then
+        CUDA_PATH="$cuda_dir"
+        break
+    fi
+done
+
+if [ -z "$CUDA_PATH" ]; then
+    echo "ERROR: CUDA not found. Please install JetPack SDK."
     exit 1
 fi
+
+echo "Found CUDA at: $CUDA_PATH"
+$CUDA_PATH/bin/nvcc --version
+
+# Export CUDA paths for this script
+export PATH="$CUDA_PATH/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_PATH/lib64:$LD_LIBRARY_PATH"
+export CUDA_HOME="$CUDA_PATH"
 
 # Install build dependencies
 echo ""
@@ -26,16 +37,9 @@ sudo apt install -y \
     cmake \
     git \
     libopenblas-dev \
-    libopenblas64-dev \
-    libonednn-dev \
     python3-dev \
     python3-pip \
     pybind11-dev
-
-# Upgrade pip and install Python build tools
-echo ""
-echo "=== Installing Python build tools ==="
-pip install --upgrade pip setuptools wheel
 
 # Clone CTranslate2
 echo ""
@@ -44,7 +48,7 @@ cd ~
 if [ -d "CTranslate2" ]; then
     echo "CTranslate2 directory exists, pulling latest..."
     cd CTranslate2
-    git pull
+    git fetch --all
 else
     git clone --recursive https://github.com/OpenNMT/CTranslate2.git
     cd CTranslate2
@@ -65,22 +69,21 @@ mkdir build
 cd build
 
 # Configure with CMake
-# Note: Adjust CUDA_ARCH based on your Jetson model:
-# - Jetson Orin Nano: compute_87 (Ampere)
-# - Jetson Xavier NX: compute_72 (Volta)
-# - Jetson Nano: compute_53 (Maxwell)
-
+# Jetson Orin Nano uses SM 8.7 (Ampere architecture)
 cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
     -DWITH_CUDA=ON \
     -DWITH_CUDNN=ON \
     -DWITH_MKL=OFF \
     -DWITH_OPENBLAS=ON \
+    -DCUDA_TOOLKIT_ROOT_DIR="$CUDA_PATH" \
+    -DCMAKE_CUDA_COMPILER="$CUDA_PATH/bin/nvcc" \
     -DCUDA_ARCH_LIST="8.7" \
     -DCMAKE_INSTALL_PREFIX=/usr/local
 
 # Build with all available cores
-echo "Building with $(nproc) cores..."
+echo ""
+echo "Building with $(nproc) cores... (this takes 15-30 minutes)"
 make -j$(nproc)
 
 # Install
@@ -89,28 +92,11 @@ echo "=== Installing CTranslate2 ==="
 sudo make install
 sudo ldconfig
 
-# Build Python bindings
-echo ""
-echo "=== Building Python bindings ==="
-cd ../python
-
-# Install in the virtual environment
-if [ -n "$VIRTUAL_ENV" ]; then
-    echo "Installing to virtual environment: $VIRTUAL_ENV"
-    pip install -r install_requirements.txt
-    pip install .
-else
-    echo "No virtual environment detected. Activate your venv first!"
-    echo "Run: source ~/voice-assistant-2/venv/bin/activate"
-    echo "Then run this script again."
-    exit 1
-fi
-
-# Verify installation
-echo ""
-echo "=== Verifying installation ==="
-python -c "import ctranslate2; print(f'CTranslate2 version: {ctranslate2.__version__}'); print(f'CUDA available: {\"cuda\" in ctranslate2.get_supported_compute_types(\"cuda\")}')"
-
 echo ""
 echo "=== Build complete! ==="
-echo "You can now run the voice assistant server."
+echo ""
+echo "Now install the Python bindings by running:"
+echo "  cd ~/CTranslate2/python"
+echo "  source ~/voice-assistant-2/venv/bin/activate"
+echo "  pip install -r install_requirements.txt"
+echo "  pip install ."
