@@ -1,0 +1,14 @@
+# Requirements for Jetson Orin Nano
+# Install with: pip install -r requirements-jetson.txt
+
+# WebSocket server
+websockets>=12.0
+
+# Faster-whisper for speech-to-text (CUDA optimized)
+faster-whisper>=1.0.0
+
+# NumPy for audio processing
+numpy>=1.24.0
+
+# Optional: LLM support (uncomment if using local LLM fallback)
+# llama-cpp-python>=0.2.0
