@@ -21,12 +21,12 @@ CHUNK_SIZE = 512  # Samples per chunk (32ms at 16kHz)
 AUDIO_FORMAT = "int16"
 
 # VAD settings
-VAD_AGGRESSIVENESS = 2  # 0-3, higher = more aggressive filtering
+VAD_AGGRESSIVENESS = 3  # 0-3, higher = more aggressive filtering (3 = most aggressive)
 VAD_FRAME_MS = 30  # Frame duration in ms (10, 20, or 30)
-SPEECH_PAD_MS = 300  # Padding around speech
-MIN_SPEECH_MS = 250  # Minimum speech duration to process
-MAX_SPEECH_MS = 10000  # Maximum recording duration
-SILENCE_TIMEOUT_MS = 1000  # Silence duration to end recording
+SPEECH_PAD_MS = 200  # Padding around speech
+MIN_SPEECH_MS = 300  # Minimum speech duration to process
+MAX_SPEECH_MS = 5000  # Maximum recording duration (5 seconds) - prevents hallucinations
+SILENCE_TIMEOUT_MS = 800  # Silence duration to end recording
 
 # Wake word settings (optional)
 WAKE_WORD_ENABLED = os.getenv("WAKE_WORD_ENABLED", "false").lower() == "true"
