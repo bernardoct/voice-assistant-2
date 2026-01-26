@@ -2,9 +2,10 @@
 Faster-whisper transcription module for low-latency speech-to-text.
 """
 
+import json
 import logging
 import numpy as np
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 from faster_whisper import WhisperModel
 
 from . import config
@@ -20,12 +21,73 @@ class Transcriber:
         model_size: str = config.WHISPER_MODEL,
         device: str = config.WHISPER_DEVICE,
         compute_type: str = config.WHISPER_COMPUTE_TYPE,
+        hotwords: Optional[List[str]] = None,
     ):
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
         self.model: Optional[WhisperModel] = None
         self._loaded = False
+        self._hotwords = hotwords or []
+        self._initial_prompt = ""
+
+    def set_hotwords(self, hotwords: List[str]) -> None:
+        """
+        Set hotwords to bias transcription toward specific terms.
+
+        Args:
+            hotwords: List of words/phrases to bias toward (e.g., device names)
+        """
+        self._hotwords = hotwords
+        # Build initial prompt from hotwords
+        # Whisper uses the initial_prompt to bias toward these words
+        if hotwords:
+            self._initial_prompt = "Smart home voice commands: " + ", ".join(hotwords) + "."
+            logger.info(f"Set {len(hotwords)} hotwords for transcription bias")
+
+    def load_hotwords_from_entities(self, entities_path: str) -> None:
+        """
+        Load hotwords from ha_entities.json file.
+        Extracts unusual device names that Whisper might not recognize.
+
+        Args:
+            entities_path: Path to ha_entities.json file
+        """
+        try:
+            with open(entities_path, "r") as f:
+                data = json.load(f)
+
+            hotwords = set()
+
+            # Extract friendly names
+            if "index" in data and "by_friendly_norm" in data["index"]:
+                for friendly_name in data["index"]["by_friendly_norm"].keys():
+                    # Add each word that might be unusual
+                    words = friendly_name.split()
+                    for word in words:
+                        # Skip common words, keep proper nouns and unusual names
+                        if len(word) > 3 and word not in {
+                            "light", "lamp", "room", "floor", "living",
+                            "bedroom", "kitchen", "office", "bathroom",
+                            "the", "and", "for", "with"
+                        }:
+                            # Capitalize to hint it's a proper noun
+                            hotwords.add(word.title())
+                    # Also add the full name
+                    hotwords.add(friendly_name.title())
+
+            # Extract room names
+            if "areas" in data:
+                for area in data["areas"]:
+                    name = area.get("name_norm", area.get("name", ""))
+                    if name:
+                        hotwords.add(name.title())
+
+            self.set_hotwords(list(hotwords))
+            logger.info(f"Loaded hotwords from entities: {sorted(hotwords)}")
+
+        except Exception as e:
+            logger.error(f"Failed to load hotwords from {entities_path}: {e}")
 
     def load(self) -> None:
         """Load the Whisper model into memory."""
@@ -79,6 +141,7 @@ class Transcriber:
             best_of=1,
             temperature=0.0,
             condition_on_previous_text=False,
+            initial_prompt=self._initial_prompt if self._initial_prompt else None,
             vad_filter=True,  # Use VAD to skip silence
             vad_parameters=dict(
                 min_silence_duration_ms=300,

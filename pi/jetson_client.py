@@ -5,7 +5,7 @@ WebSocket client for communicating with Jetson server.
 import asyncio
 import json
 import logging
-from typing import AsyncGenerator, Callable, Optional, Tuple
+from typing import AsyncGenerator, Callable, List, Optional, Tuple
 
 import websockets
 from websockets.client import WebSocketClientProtocol
@@ -164,23 +164,23 @@ class JetsonClient:
         self,
         audio_data: bytes,
         sample_rate: int = 16000,
-    ) -> Tuple[Optional[str], Optional[IntentMessage]]:
+    ) -> Tuple[Optional[str], List[IntentMessage]]:
         """
-        Send audio and wait for transcription and intent.
+        Send audio and wait for transcription and intent(s).
 
         Args:
             audio_data: Raw PCM audio bytes
             sample_rate: Audio sample rate
 
         Returns:
-            Tuple of (transcription text, intent message)
+            Tuple of (transcription text, list of intent messages)
         """
         if not self.is_connected:
             if not await self.reconnect():
-                return None, None
+                return None, []
 
         transcription = None
-        intent = None
+        intents = []
 
         try:
             # Send audio in chunks for efficiency
@@ -194,9 +194,21 @@ class JetsonClient:
             # Signal end of audio
             await self.send_audio_end()
 
-            # Wait for responses
+            # Wait for responses - may receive multiple intents for chained commands
+            last_intent_time = None
             while True:
-                msg = await asyncio.wait_for(self.receive(), timeout=10.0)
+                try:
+                    msg = await asyncio.wait_for(self.receive(), timeout=2.0)
+                except asyncio.TimeoutError:
+                    # If we have at least one intent, we're done
+                    if intents:
+                        break
+                    # Otherwise keep waiting with longer timeout
+                    try:
+                        msg = await asyncio.wait_for(self.receive(), timeout=8.0)
+                    except asyncio.TimeoutError:
+                        break
+
                 if msg is None:
                     break
 
@@ -208,8 +220,9 @@ class JetsonClient:
 
                 elif msg_type == MessageType.INTENT:
                     intent = IntentMessage.from_json(json.dumps(msg))
+                    intents.append(intent)
                     logger.debug(f"Intent: {intent.intent} -> {intent.targets}")
-                    break  # Intent is the final response
+                    # Continue listening for more intents (chained commands)
 
                 elif msg_type == MessageType.ERROR:
                     logger.error(f"Server error: {msg.get('error')}")
@@ -223,7 +236,7 @@ class JetsonClient:
         except Exception as e:
             logger.error(f"Error processing audio: {e}")
 
-        return transcription, intent
+        return transcription, intents
 
     async def stream_audio(
         self,

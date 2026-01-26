@@ -46,6 +46,7 @@ class VoiceAssistantServer:
     ):
         self.host = host
         self.port = port
+        self.entities_path = entities_path
         self.transcriber = Transcriber()
         self.intent_parser = IntentParser(entities_path)
         self._running = False
@@ -56,6 +57,11 @@ class VoiceAssistantServer:
         # Pre-load models
         logger.info("Loading models...")
         self.transcriber.load()
+
+        # Load hotwords from entities for transcription bias
+        if self.entities_path:
+            self.transcriber.load_hotwords_from_entities(self.entities_path)
+
         logger.info("Models loaded, starting server...")
 
         self._running = True
@@ -184,17 +190,19 @@ class VoiceAssistantServer:
             )
             await websocket.send(transcription_msg.to_json())
 
-            # Parse intent
-            intent = self.intent_parser.parse(text)
-            intent.confidence = min(intent.confidence, confidence)
+            # Parse intent(s) - may return multiple for chained commands
+            intents = self.intent_parser.parse_all(text)
 
-            logger.info(
-                f"Parsed intent: {intent.intent} -> {intent.targets} "
-                f"(confidence: {intent.confidence:.2f})"
-            )
+            for intent in intents:
+                intent.confidence = min(intent.confidence, confidence)
 
-            # Send intent
-            await websocket.send(intent.to_json())
+                logger.info(
+                    f"Parsed intent: {intent.intent} -> {intent.targets} "
+                    f"(confidence: {intent.confidence:.2f})"
+                )
+
+                # Send intent
+                await websocket.send(intent.to_json())
 
         except Exception as e:
             logger.exception(f"Error processing audio: {e}")

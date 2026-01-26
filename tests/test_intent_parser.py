@@ -329,3 +329,111 @@ class TestIntentParserRoomAliases:
 
         assert intent.intent == IntentType.TURN_OFF
         assert "light.office_floor_lamp" in intent.targets
+
+
+class TestMultipleTargets:
+    """Tests for commands with multiple targets."""
+
+    def test_two_rooms_with_and(self, intent_parser):
+        """Test: 'Turn off the kitchen and living room' -> both rooms"""
+        intent = intent_parser.parse("Turn off the kitchen and living room")
+
+        assert intent.intent == IntentType.TURN_OFF
+        # Should have lights from both rooms
+        assert "light.countertop_light" in intent.targets
+        assert "light.artemide_tolomeo_mega_living_room_floor_lamp" in intent.targets
+        assert "light.dresser_lamp" in intent.targets
+
+    def test_two_devices_with_and(self, intent_parser):
+        """Test: 'Turn on the bedside lamp and noguchi' -> both devices"""
+        intent = intent_parser.parse("Turn on the bedside lamp and noguchi")
+
+        assert intent.intent == IntentType.TURN_ON
+        assert "light.bedside_lamp" in intent.targets
+        assert "light.dresser_lamp" in intent.targets
+
+    def test_room_and_device_mixed(self, intent_parser):
+        """Test: 'Turn on the kitchen and bedside lamp' -> mixed"""
+        intent = intent_parser.parse("Turn on the kitchen and bedside lamp")
+
+        assert intent.intent == IntentType.TURN_ON
+        assert "light.countertop_light" in intent.targets
+        assert "light.bedside_lamp" in intent.targets
+
+    def test_and_the_variant(self, intent_parser):
+        """Test: 'Turn off the kitchen and the bedroom' -> handles 'and the'"""
+        intent = intent_parser.parse("Turn off the kitchen and the bedroom")
+
+        assert intent.intent == IntentType.TURN_OFF
+        assert "light.countertop_light" in intent.targets
+        assert "light.bedside_lamp" in intent.targets
+
+    def test_multiple_with_lights_suffix(self, intent_parser):
+        """Test: 'Turn off the kitchen and living room lights' -> removes suffix"""
+        intent = intent_parser.parse("Turn off the kitchen and living room lights")
+
+        assert intent.intent == IntentType.TURN_OFF
+        assert "light.countertop_light" in intent.targets
+        assert "light.artemide_tolomeo_mega_living_room_floor_lamp" in intent.targets
+
+
+class TestChainedCommands:
+    """Tests for chained commands."""
+
+    def test_turn_on_and_dim(self, intent_parser):
+        """Test: 'Turn on the bedside lamp and dim it to 30%' -> two intents"""
+        intents = intent_parser.parse_all("Turn on the bedside lamp and dim it to 30%")
+
+        assert len(intents) == 2
+
+        # First intent: turn on
+        assert intents[0].intent == IntentType.TURN_ON
+        assert "light.bedside_lamp" in intents[0].targets
+
+        # Second intent: set brightness with same target
+        assert intents[1].intent == IntentType.SET_BRIGHTNESS
+        assert "light.bedside_lamp" in intents[1].targets
+        assert intents[1].brightness == 30
+
+    def test_turn_on_and_set_brightness(self, intent_parser):
+        """Test: 'Turn on the bedroom and set it to 50 percent' -> two intents"""
+        intents = intent_parser.parse_all("Turn on the bedroom and set it to 50 percent")
+
+        assert len(intents) == 2
+
+        # First intent: turn on room
+        assert intents[0].intent == IntentType.TURN_ON
+        assert "light.bedside_lamp" in intents[0].targets
+
+        # Second intent: set brightness
+        assert intents[1].intent == IntentType.SET_BRIGHTNESS
+        assert intents[1].brightness == 50
+
+    def test_two_separate_commands(self, intent_parser):
+        """Test: 'Turn on the kitchen and turn off the bedroom' -> two intents"""
+        intents = intent_parser.parse_all("Turn on the kitchen and turn off the bedroom")
+
+        assert len(intents) == 2
+
+        assert intents[0].intent == IntentType.TURN_ON
+        assert "light.countertop_light" in intents[0].targets
+
+        assert intents[1].intent == IntentType.TURN_OFF
+        assert "light.bedside_lamp" in intents[1].targets
+
+    def test_single_command_not_chained(self, intent_parser):
+        """Test: Regular command returns single intent"""
+        intents = intent_parser.parse_all("Turn on the kitchen")
+
+        assert len(intents) == 1
+        assert intents[0].intent == IntentType.TURN_ON
+
+    def test_multiple_targets_not_confused_with_chained(self, intent_parser):
+        """Test: 'Turn off kitchen and bedroom' is NOT a chained command"""
+        intents = intent_parser.parse_all("Turn off the kitchen and bedroom")
+
+        # Should be one intent with multiple targets, not two intents
+        assert len(intents) == 1
+        assert intents[0].intent == IntentType.TURN_OFF
+        assert "light.countertop_light" in intents[0].targets
+        assert "light.bedside_lamp" in intents[0].targets

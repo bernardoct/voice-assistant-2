@@ -126,22 +126,28 @@ async def process_command(
     intent_parser: IntentParser,
     ha_controller: HomeAssistantController,
 ) -> bool:
-    """Process a single typed command."""
+    """Process a single typed command (may contain chained commands)."""
     print(f"\nProcessing: '{command}'")
     print("-" * 50)
 
-    # Parse the command
-    intent = intent_parser.parse(command)
+    # Parse the command - may return multiple intents for chained commands
+    intents = intent_parser.parse_all(command)
 
-    # Execute the intent
-    success = await execute_intent(ha_controller, intent)
+    all_success = True
+    for i, intent in enumerate(intents):
+        if len(intents) > 1:
+            print(f"\n  Command {i + 1}/{len(intents)}:")
 
-    if success:
-        print("  [OK] Command executed successfully")
-    else:
-        print("  [FAILED] Command execution failed")
+        # Execute the intent
+        success = await execute_intent(ha_controller, intent)
+        all_success = all_success and success
 
-    return success
+        if success:
+            print("  [OK] Command executed successfully")
+        else:
+            print("  [FAILED] Command execution failed")
+
+    return all_success
 
 
 async def interactive_mode(
@@ -157,6 +163,12 @@ async def interactive_mode(
     print("  - Turn off the living room")
     print("  - Set the bedside lamp to 50 percent")
     print("  - Toggle the office")
+    print("\nMultiple targets:")
+    print("  - Turn off the kitchen and living room")
+    print("  - Turn on the bedside lamp and noguchi")
+    print("\nChained commands:")
+    print("  - Turn on the bedside lamp and dim it to 30%")
+    print("  - Turn on the bedroom and set it to 50 percent")
     print("\nType 'quit' or 'exit' to stop.")
     print("Type 'rooms' to list available rooms.")
     print("Type 'devices' to list available devices.")

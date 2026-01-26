@@ -165,13 +165,18 @@ class IntentParser:
 
     def _extract_target(self, target_text: str) -> Tuple[List[str], str]:
         """
-        Extract target entities from text.
+        Extract target entities from text. Supports multiple targets with "and".
 
         Returns:
             Tuple of (entity_ids, target_type)
-            target_type is either "entity" or "room"
+            target_type is either "entity", "room", or "mixed"
         """
         target_text = self._normalize_text(target_text)
+
+        # Check for multiple targets with "and"
+        # e.g., "kitchen and living room" or "bedside lamp and noguchi"
+        if " and " in target_text:
+            return self._extract_multiple_targets(target_text)
 
         # Check for specific entity FIRST (more specific match)
         # This ensures "office floor lamp" matches the device, not "office" room
@@ -192,6 +197,148 @@ class IntentParser:
 
         # Return empty if no match found
         return [], "unknown"
+
+    def _extract_multiple_targets(self, target_text: str) -> Tuple[List[str], str]:
+        """
+        Extract multiple targets separated by 'and'.
+
+        Args:
+            target_text: Text containing multiple targets (e.g., "kitchen and living room")
+
+        Returns:
+            Tuple of (combined entity_ids, target_type)
+        """
+        # Split on " and " but be careful with "and the"
+        target_text = re.sub(r"\s+and\s+the\s+", " and ", target_text)
+        parts = [p.strip() for p in target_text.split(" and ")]
+
+        all_entities = []
+        has_room = False
+        has_entity = False
+
+        for part in parts:
+            # Clean up common suffixes
+            part = re.sub(r"\s*lights?\s*$", "", part)
+
+            # Try to find this target
+            entities = self._find_entity(part)
+            if entities:
+                light_entities = [e for e in entities if e.startswith("light.")]
+                if light_entities:
+                    all_entities.extend(light_entities)
+                else:
+                    all_entities.extend(entities)
+                has_entity = True
+            else:
+                room = self._find_room(part)
+                if room and room in self.room_to_entities:
+                    all_entities.extend(self.room_to_entities[room])
+                    has_room = True
+
+        # Determine target type
+        if has_room and has_entity:
+            target_type = "mixed"
+        elif has_room:
+            target_type = "room"
+        elif has_entity:
+            target_type = "entity"
+        else:
+            target_type = "unknown"
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_entities = []
+        for e in all_entities:
+            if e not in seen:
+                seen.add(e)
+                unique_entities.append(e)
+
+        return unique_entities, target_type
+
+    def _split_chained_commands(self, text: str) -> List[str]:
+        """
+        Split text into multiple commands if chained.
+
+        Handles patterns like:
+        - "turn on X and dim it to Y"
+        - "turn on X and turn off Y"
+        - "turn on X then set it to 50%"
+
+        Returns:
+            List of command strings
+        """
+        # Patterns that indicate a new command after "and" or "then"
+        chain_patterns = [
+            r"\s+and\s+(turn|switch|set|dim|toggle|make)\s+",
+            r"\s+then\s+(turn|switch|set|dim|toggle|make)\s+",
+            r"\s+and\s+(it\s+to\s+\d+)",  # "and it to 50%"
+        ]
+
+        # Check if this looks like a chained command
+        for pattern in chain_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                # Split on "and <action>" or "then <action>"
+                parts = re.split(r"\s+(?:and|then)\s+(?=turn|switch|set|dim|toggle|make|it\s+to)", text, flags=re.IGNORECASE)
+                if len(parts) > 1:
+                    return [p.strip() for p in parts if p.strip()]
+
+        return [text]
+
+    def parse_all(self, text: str) -> List[IntentMessage]:
+        """
+        Parse a voice command that may contain multiple chained commands.
+
+        Args:
+            text: The transcribed voice command
+
+        Returns:
+            List of IntentMessage objects
+        """
+        original_text = text
+        normalized = self._normalize_text(text)
+
+        # Split into potential multiple commands
+        command_parts = self._split_chained_commands(normalized)
+
+        if len(command_parts) == 1:
+            # Single command, use normal parsing
+            return [self.parse(text)]
+
+        # Multiple commands - parse each one
+        intents = []
+        previous_targets = []
+
+        for i, part in enumerate(command_parts):
+            # Handle "it" pronoun reference to previous targets
+            if previous_targets and re.search(r"\bit\b", part, re.IGNORECASE):
+                # Replace "it" with a placeholder and use previous targets
+                part_modified = re.sub(r"\bit\s+to\s+", "PREV_TARGET to ", part)
+                part_modified = re.sub(r"\bit\b", "PREV_TARGET", part_modified)
+
+                # Try to parse as brightness command with previous target
+                brightness_match = re.search(r"(?:to\s+)?(\d+)\s*(?:percent|%)?", part)
+                if brightness_match and previous_targets:
+                    brightness = int(brightness_match.group(1))
+                    intent = IntentMessage(
+                        intent=IntentType.SET_BRIGHTNESS,
+                        targets=previous_targets.copy(),
+                        target_type="entity",
+                        brightness=min(100, max(0, brightness)),
+                        original_text=original_text,
+                        confidence=0.85,
+                    )
+                    intents.append(intent)
+                    continue
+
+            # Parse this part normally
+            intent = self.parse(part)
+            intents.append(intent)
+
+            # Remember targets for pronoun resolution
+            if intent.targets:
+                previous_targets = intent.targets.copy()
+
+        return intents
 
     def parse(self, text: str) -> IntentMessage:
         """

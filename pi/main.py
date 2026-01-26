@@ -215,26 +215,40 @@ class VoiceAssistant:
 
         try:
             # Send to Jetson for transcription and intent parsing
-            transcription, intent = await self.jetson_client.process_audio(
+            # May return multiple intents for chained commands
+            transcription, intents = await self.jetson_client.process_audio(
                 audio_data, config.SAMPLE_RATE
             )
 
             if transcription:
                 logger.info(f"Transcription: {transcription}")
 
-            if intent and intent.intent != IntentType.UNKNOWN:
-                # Execute the intent
-                success = await self._execute_intent(intent)
-
-                # Play feedback
+            if not intents:
+                logger.info("No intents parsed")
                 if self.feedback:
-                    if success:
+                    await self.feedback.play_unknown()
+                return
+
+            # Execute all intents
+            all_success = True
+            has_valid_intent = False
+
+            for intent in intents:
+                if intent.intent != IntentType.UNKNOWN:
+                    has_valid_intent = True
+                    success = await self._execute_intent(intent)
+                    all_success = all_success and success
+                else:
+                    logger.info(f"Unknown command: {intent.original_text}")
+
+            # Play feedback based on overall result
+            if self.feedback:
+                if has_valid_intent:
+                    if all_success:
                         await self.feedback.play_success()
                     else:
                         await self.feedback.play_error()
-            elif intent:
-                logger.info(f"Unknown command: {intent.original_text}")
-                if self.feedback:
+                else:
                     await self.feedback.play_unknown()
 
         except Exception as e:
