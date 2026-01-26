@@ -173,14 +173,8 @@ class IntentParser:
         """
         target_text = self._normalize_text(target_text)
 
-        # Check for room first
-        room = self._find_room(target_text)
-        if room and room in self.room_to_entities:
-            entities = self.room_to_entities[room]
-            if entities:
-                return entities, "room"
-
-        # Check for specific entity
+        # Check for specific entity FIRST (more specific match)
+        # This ensures "office floor lamp" matches the device, not "office" room
         entities = self._find_entity(target_text)
         if entities:
             # Filter to only light entities for light commands
@@ -188,6 +182,13 @@ class IntentParser:
             if light_entities:
                 return light_entities, "entity"
             return entities, "entity"
+
+        # Check for room if no specific entity found
+        room = self._find_room(target_text)
+        if room and room in self.room_to_entities:
+            entities = self.room_to_entities[room]
+            if entities:
+                return entities, "room"
 
         # Return empty if no match found
         return [], "unknown"
