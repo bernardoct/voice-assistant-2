@@ -178,7 +178,25 @@ class IntentParser:
         if " and " in target_text:
             return self._extract_multiple_targets(target_text)
 
-        # Check for specific entity FIRST (more specific match)
+        # Clean up common suffixes that indicate room context
+        text_for_room = re.sub(r"\s*lights?\s*$", "", target_text)
+
+        # Check for EXACT room match first (e.g., "living room" should match the room)
+        # This prevents "living room" from matching "artemide tolomeo mega living room floor lamp"
+        if text_for_room in self.room_names:
+            entities = self.room_to_entities.get(text_for_room, [])
+            if entities:
+                return entities, "room"
+
+        # Check room aliases for exact match
+        for room, aliases in self.ROOM_ALIASES.items():
+            if text_for_room in aliases:
+                if room in self.room_names:
+                    entities = self.room_to_entities.get(room, [])
+                    if entities:
+                        return entities, "room"
+
+        # Check for specific entity match (exact or partial)
         # This ensures "office floor lamp" matches the device, not "office" room
         entities = self._find_entity(target_text)
         if entities:
@@ -188,7 +206,7 @@ class IntentParser:
                 return light_entities, "entity"
             return entities, "entity"
 
-        # Check for room if no specific entity found
+        # Fall back to partial room match
         room = self._find_room(target_text)
         if room and room in self.room_to_entities:
             entities = self.room_to_entities[room]
@@ -218,9 +236,27 @@ class IntentParser:
 
         for part in parts:
             # Clean up common suffixes
-            part = re.sub(r"\s*lights?\s*$", "", part)
+            part_clean = re.sub(r"\s*lights?\s*$", "", part)
 
-            # Try to find this target
+            # Check for EXACT room match first
+            if part_clean in self.room_names:
+                all_entities.extend(self.room_to_entities.get(part_clean, []))
+                has_room = True
+                continue
+
+            # Check room aliases for exact match
+            room_matched = False
+            for room, aliases in self.ROOM_ALIASES.items():
+                if part_clean in aliases and room in self.room_names:
+                    all_entities.extend(self.room_to_entities.get(room, []))
+                    has_room = True
+                    room_matched = True
+                    break
+
+            if room_matched:
+                continue
+
+            # Try to find entity
             entities = self._find_entity(part)
             if entities:
                 light_entities = [e for e in entities if e.startswith("light.")]
@@ -230,6 +266,7 @@ class IntentParser:
                     all_entities.extend(entities)
                 has_entity = True
             else:
+                # Fall back to partial room match
                 room = self._find_room(part)
                 if room and room in self.room_to_entities:
                     all_entities.extend(self.room_to_entities[room])
