@@ -13,15 +13,6 @@ from . import config
 
 logger = logging.getLogger(__name__)
 
-# Minimum audio RMS energy to consider as speech (filters silence/noise)
-MIN_AUDIO_ENERGY = 0.005
-
-# Minimum confidence threshold for transcription
-MIN_CONFIDENCE = 0.3
-
-# Maximum repetition ratio (if a phrase repeats more than this, it's hallucination)
-MAX_REPETITION_RATIO = 0.4
-
 
 class Transcriber:
     """Wrapper for faster-whisper model with optimizations for low latency."""
@@ -128,8 +119,8 @@ class Transcriber:
             True if audio likely contains speech
         """
         rms = np.sqrt(np.mean(audio ** 2))
-        if rms < MIN_AUDIO_ENERGY:
-            logger.debug(f"Audio energy too low: {rms:.4f} < {MIN_AUDIO_ENERGY}")
+        if rms < config.MIN_AUDIO_ENERGY:
+            logger.debug(f"Audio energy too low: {rms:.4f} < {config.MIN_AUDIO_ENERGY}")
             return False
         return True
 
@@ -172,19 +163,19 @@ class Transcriber:
 
         # Check for high repetition ratio
         words = text_lower.split()
-        if len(words) > 5:
+        if len(words) > config.MIN_WORDS_FOR_REPETITION_CHECK:
             # Count unique words
             unique_words = set(words)
             repetition_ratio = 1 - (len(unique_words) / len(words))
 
-            if repetition_ratio > MAX_REPETITION_RATIO:
+            if repetition_ratio > config.MAX_REPETITION_RATIO:
                 logger.debug(
                     f"High repetition ratio ({repetition_ratio:.2f}): {text[:50]}..."
                 )
                 return True
 
         # Check for very long text with no command keywords
-        if len(words) > 15:
+        if len(words) > config.MAX_WORDS_WITHOUT_KEYWORDS:
             command_keywords = {
                 "turn", "switch", "on", "off", "dim", "set", "toggle",
                 "light", "lights", "lamp", "room", "kitchen", "bedroom",
@@ -235,14 +226,14 @@ class Transcriber:
             temperature=0.0,
             condition_on_previous_text=False,
             initial_prompt=self._initial_prompt if self._initial_prompt else None,
-            no_speech_threshold=0.6,  # Higher = more aggressive filtering of non-speech
-            log_prob_threshold=-1.0,  # Filter low-confidence segments
+            no_speech_threshold=config.WHISPER_NO_SPEECH_THRESHOLD,
+            log_prob_threshold=config.WHISPER_LOG_PROB_THRESHOLD,
             vad_filter=True,  # Use VAD to skip silence
             vad_parameters=dict(
-                threshold=0.5,  # Higher = more aggressive VAD
-                min_silence_duration_ms=500,  # Longer silence needed to split
-                speech_pad_ms=200,
-                min_speech_duration_ms=100,  # Minimum speech duration
+                threshold=config.WHISPER_VAD_THRESHOLD,
+                min_silence_duration_ms=config.WHISPER_VAD_MIN_SILENCE_MS,
+                speech_pad_ms=config.WHISPER_VAD_SPEECH_PAD_MS,
+                min_speech_duration_ms=config.WHISPER_VAD_MIN_SPEECH_MS,
             ),
         )
 
@@ -253,11 +244,11 @@ class Transcriber:
 
         for segment in segments:
             # Skip low-confidence segments
-            if segment.no_speech_prob > 0.5:
+            if segment.no_speech_prob > config.WHISPER_SEGMENT_NO_SPEECH_PROB:
                 logger.debug(f"Skipping high no_speech_prob segment: {segment.text}")
                 continue
 
-            if segment.avg_logprob < -1.5:
+            if segment.avg_logprob < config.WHISPER_SEGMENT_AVG_LOGPROB:
                 logger.debug(f"Skipping low confidence segment: {segment.text}")
                 continue
 
@@ -275,7 +266,7 @@ class Transcriber:
             return "", 0.0
 
         # Final confidence check
-        if avg_confidence < MIN_CONFIDENCE and full_text:
+        if avg_confidence < config.MIN_TRANSCRIPTION_CONFIDENCE and full_text:
             logger.debug(f"Low confidence transcription filtered: {full_text}")
             return "", avg_confidence
 

@@ -177,7 +177,7 @@ class AudioCapture:
                 num_voiced = sum(1 for _, speech in ring_buffer if speech)
 
                 # Trigger if enough voiced frames
-                if num_voiced > 0.8 * ring_buffer.maxlen:
+                if num_voiced > config.VAD_TRIGGER_RATIO * ring_buffer.maxlen:
                     triggered = True
                     speech_frame_count = 0
 

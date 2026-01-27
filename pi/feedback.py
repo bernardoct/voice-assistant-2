@@ -30,7 +30,7 @@ class AudioFeedback:
 
     def __init__(
         self,
-        sample_rate: int = 44100,
+        sample_rate: int = config.FEEDBACK_SAMPLE_RATE,
         volume: float = config.FEEDBACK_VOLUME,
     ):
         self.sample_rate = sample_rate

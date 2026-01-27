@@ -30,8 +30,8 @@ class JetsonClient:
     def __init__(
         self,
         url: str = config.JETSON_URL,
-        reconnect_delay: float = 1.0,
-        max_reconnect_delay: float = 30.0,
+        reconnect_delay: float = config.WS_RECONNECT_DELAY,
+        max_reconnect_delay: float = config.WS_MAX_RECONNECT_DELAY,
     ):
         self.url = url
         self.reconnect_delay = reconnect_delay
@@ -59,7 +59,7 @@ class JetsonClient:
             )
 
             # Wait for ready message
-            msg = await asyncio.wait_for(self._ws.recv(), timeout=30.0)
+            msg = await asyncio.wait_for(self._ws.recv(), timeout=config.WS_RECEIVE_TIMEOUT)
             data = json.loads(msg)
 
             if data.get("type") == MessageType.READY:
@@ -111,7 +111,7 @@ class JetsonClient:
     def is_connected(self) -> bool:
         return self._connected and self._ws is not None
 
-    async def send_audio(self, audio_data: bytes, sample_rate: int = 16000) -> None:
+    async def send_audio(self, audio_data: bytes, sample_rate: int = config.SAMPLE_RATE) -> None:
         """
         Send audio data to server.
 
@@ -163,7 +163,7 @@ class JetsonClient:
     async def process_audio(
         self,
         audio_data: bytes,
-        sample_rate: int = 16000,
+        sample_rate: int = config.SAMPLE_RATE,
     ) -> Tuple[Optional[str], List[IntentMessage]]:
         """
         Send audio and wait for transcription and intent(s).
@@ -184,7 +184,7 @@ class JetsonClient:
 
         try:
             # Send audio in chunks for efficiency
-            chunk_size = 32000  # ~1 second at 16kHz
+            chunk_size = config.WS_AUDIO_CHUNK_SIZE
             for i in range(0, len(audio_data), chunk_size):
                 chunk = audio_data[i:i + chunk_size]
                 await self.send_audio(chunk, sample_rate)
@@ -241,7 +241,7 @@ class JetsonClient:
     async def stream_audio(
         self,
         audio_generator: AsyncGenerator[bytes, None],
-        sample_rate: int = 16000,
+        sample_rate: int = config.SAMPLE_RATE,
         on_transcription: Optional[Callable[[str], None]] = None,
         on_intent: Optional[Callable[[IntentMessage], None]] = None,
     ) -> Optional[IntentMessage]:

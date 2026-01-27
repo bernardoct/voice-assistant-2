@@ -69,9 +69,9 @@ class VoiceAssistantServer:
             self._handle_client,
             self.host,
             self.port,
-            ping_interval=30,
-            ping_timeout=10,
-            max_size=10 * 1024 * 1024,  # 10MB max message size
+            ping_interval=config.WS_PING_INTERVAL,
+            ping_timeout=config.WS_PING_TIMEOUT,
+            max_size=config.WS_MAX_SIZE,
         )
 
         logger.info(f"Server listening on ws://{self.host}:{self.port}")
@@ -153,7 +153,7 @@ class VoiceAssistantServer:
             # Combine audio chunks
             combined = b"".join(audio_chunks)
 
-            if len(combined) < 1000:
+            if len(combined) < config.MIN_AUDIO_BYTES:
                 logger.debug("Audio too short, skipping")
                 return
 
@@ -161,9 +161,9 @@ class VoiceAssistantServer:
             audio = np.frombuffer(combined, dtype=np.int16).astype(np.float32) / 32768.0
 
             # Resample if necessary
-            if sample_rate != 16000:
+            if sample_rate != config.SAMPLE_RATE:
                 # Simple resampling (for production, use proper resampling)
-                ratio = 16000 / sample_rate
+                ratio = config.SAMPLE_RATE / sample_rate
                 new_length = int(len(audio) * ratio)
                 audio = np.interp(
                     np.linspace(0, len(audio), new_length),
@@ -172,7 +172,7 @@ class VoiceAssistantServer:
                 )
 
             # Transcribe
-            logger.debug(f"Transcribing {len(audio)/16000:.2f}s of audio...")
+            logger.debug(f"Transcribing {len(audio)/config.SAMPLE_RATE:.2f}s of audio...")
             text, confidence = await asyncio.get_event_loop().run_in_executor(
                 None, self.transcriber.transcribe, audio
             )
