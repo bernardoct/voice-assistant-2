@@ -88,7 +88,8 @@ class IntentParser:
             # Build room to entities mapping
             if "areas" in data:
                 for area in data["areas"]:
-                    room_name = area.get("name_norm", area.get("name", ""))
+                    # Get room name, preferring normalized version, and ensure lowercase
+                    room_name = area.get("name_norm", area.get("name", "")).lower()
                     entities = area.get("light_entities", [])
                     if room_name:
                         self.room_to_entities[room_name] = entities
