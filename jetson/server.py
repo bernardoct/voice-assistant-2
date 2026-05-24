@@ -29,7 +29,7 @@ from shared.protocol import (
 
 # Setup logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -94,6 +94,7 @@ class VoiceAssistantServer:
 
         audio_buffer = []
         sample_rate = config.SAMPLE_RATE
+        _chunk_count = 0  # debug counter, reset each utterance
 
         try:
             async for message in websocket:
@@ -109,7 +110,17 @@ class VoiceAssistantServer:
                         audio_buffer.append(audio_data)
                     else:
                         # Raw audio data
-                        audio_buffer.append(message)
+                        audio_data = message
+
+                        audio_buffer.append(audio_data)
+
+                    _chunk_count += 1
+                    _total_bytes = sum(len(c) for c in audio_buffer)
+                    _duration_ms = (_total_bytes / 2) / sample_rate * 1000  # int16 = 2 bytes/sample
+                    logger.debug(
+                        f"[STREAM] chunk #{_chunk_count}: {len(audio_data)} B  |  "
+                        f"buffer total: {_total_bytes} B  ({_duration_ms:.0f} ms @ {sample_rate} Hz)"
+                    )
 
                 # Handle JSON messages
                 elif isinstance(message, str):
@@ -118,6 +129,15 @@ class VoiceAssistantServer:
                         msg_type = data.get("type")
 
                         if msg_type == MessageType.AUDIO_END:
+                            _total_bytes = sum(len(c) for c in audio_buffer)
+                            _duration_ms = (_total_bytes / 2) / sample_rate * 1000
+                            logger.info(
+                                f"[STREAM] AUDIO_END received — "
+                                f"{_chunk_count} chunks, {_total_bytes} B, "
+                                f"{_duration_ms:.0f} ms @ {sample_rate} Hz"
+                            )
+                            _chunk_count = 0  # reset for next utterance
+
                             # Process accumulated audio
                             if audio_buffer:
                                 await self._process_audio(
@@ -126,7 +146,12 @@ class VoiceAssistantServer:
                                 audio_buffer = []
 
                         elif msg_type == MessageType.CANCEL:
+                            logger.info(
+                                f"[STREAM] CANCEL received after {_chunk_count} chunks "
+                                f"({sum(len(c) for c in audio_buffer)} B buffered)"
+                            )
                             audio_buffer = []
+                            _chunk_count = 0
                             logger.debug("Audio processing cancelled")
 
                     except json.JSONDecodeError as e:
@@ -160,6 +185,16 @@ class VoiceAssistantServer:
             # Convert to numpy array
             audio = np.frombuffer(combined, dtype=np.int16).astype(np.float32) / 32768.0
 
+            # # Debug: save raw audio to WAV file so you can listen to it
+            # import wave, time as _time
+            # _debug_path = f"/tmp/debug_audio_{int(_time.time())}.wav"
+            # with wave.open(_debug_path, "wb") as _wf:
+            #     _wf.setnchannels(1)          # mono
+            #     _wf.setsampwidth(2)           # 16-bit = 2 bytes
+            #     _wf.setframerate(sample_rate)
+            #     _wf.writeframes(combined)     # write original int16 bytes
+            # logger.info(f"Debug audio saved to {_debug_path}")
+
             # Resample if necessary
             if sample_rate != config.SAMPLE_RATE:
                 # Simple resampling (for production, use proper resampling)
@@ -176,6 +211,7 @@ class VoiceAssistantServer:
             text, confidence = await asyncio.get_event_loop().run_in_executor(
                 None, self.transcriber.transcribe, audio
             )
+            logger.debug(f"Text: {text}")
 
             if not text:
                 logger.debug("No transcription result")

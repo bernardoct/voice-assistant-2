@@ -138,7 +138,7 @@ class IntentParser:
 
     def _find_entity(self, text: str) -> Optional[List[str]]:
         """Find entity in text by friendly name matching."""
-        text_lower = text.lower()
+        text_lower = re.sub("[,\.;:]", "", text.lower())
 
         # Try exact match first
         if text_lower in self.friendly_to_entity:
