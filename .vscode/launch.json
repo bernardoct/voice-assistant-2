@@ -10,6 +10,12 @@
             "request": "launch",
             "program": "${workspaceFolder}/run_jetson.py",
             "args": ["--entities", "/home/bernardoct/ha_entities.json", "--model", "base.en"]
+        },
+        {
+            "name": "Python Debugger: Run Pi",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pi.main"
         }
     ]
 }
