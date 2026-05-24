@@ -36,7 +36,7 @@ class IntentParser:
     ]
 
     BRIGHTNESS_PATTERNS = [
-        r"(?:set|dim|change)\s+(?:the\s+)?(.+?)\s+(?:to\s+)?(\d+)\s*(?:percent|%)?",
+        r"(?:set|dim|dean|change)\s+(?:the\s+)?(.+?)\s+(?:to\s+)?(\d+)\s*(?:percent|%)?",
         r"(?:set|change)\s+(?:the\s+)?(.+?)\s+brightness\s+(?:to\s+)?(\d+)\s*(?:percent|%)?",
         r"dim\s+(?:the\s+)?(.+?)\s+(?:to\s+)?(\d+)\s*(?:percent|%)?",
         r"(?:make\s+)?(?:the\s+)?(.+?)\s+(?:brighter|dimmer|lighter|darker)",

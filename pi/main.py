@@ -7,8 +7,11 @@ Captures voice commands and controls Home Assistant entities.
 import asyncio
 import argparse
 import logging
+import os
 import signal
 import sys
+import time
+import wave
 from typing import Optional
 
 from . import config
@@ -212,6 +215,20 @@ class VoiceAssistant:
             return
 
         self._processing = True
+
+        # # Save audio to WAV file for debugging before sending to Jetson
+        # try:
+        #     debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug_audio")
+        #     os.makedirs(debug_dir, exist_ok=True)
+        #     wav_path = os.path.join(debug_dir, f"sent_{time.strftime('%Y%m%d_%H%M%S')}.wav")
+        #     with wave.open(wav_path, "wb") as wf:
+        #         wf.setnchannels(config.CHANNELS)
+        #         wf.setsampwidth(2)  # 16-bit PCM = 2 bytes
+        #         wf.setframerate(config.SAMPLE_RATE)
+        #         wf.writeframes(audio_data)
+        #     logger.info(f"Saved audio to {wav_path} ({len(audio_data)} bytes)")
+        # except Exception as e:
+        #     logger.warning(f"Failed to save debug audio: {e}")
 
         try:
             # Send to Jetson for transcription and intent parsing
