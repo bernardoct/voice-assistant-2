@@ -10,7 +10,7 @@
 set -e
 
 PROJECT_DIR="/home/bernardoct/voice-assistant-2"
-PYTHON_BIN="${PROJECT_DIR}/venv/bin/python"
+PYTHON_BIN="${PROJECT_DIR}/.venv/bin/python"
 LOG_FILE="/var/log/jetson_server_watchdog.log"
 SERVER_LOG="/var/log/jetson_server.log"
 

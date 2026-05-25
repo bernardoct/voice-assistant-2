@@ -3,6 +3,7 @@ Intent parser for voice commands.
 Uses pattern matching for common commands with optional LLM fallback.
 """
 
+import os
 import re
 import json
 import logging
@@ -68,15 +69,42 @@ class IntentParser:
         self.room_names: List[str] = []
         self.friendly_to_entity: Dict[str, List[str]] = {}
         self.room_to_entities: Dict[str, List[str]] = {}
+        # Path + mtime so callers can detect when a fresh sync has landed.
+        self.entities_path: Optional[str] = entities_path
+        self.entities_mtime: float = 0.0
 
         if entities_path:
             self.load_entities(entities_path)
+
+    def maybe_reload(self) -> bool:
+        """Reload entities if the file's mtime has advanced. Returns True if reloaded."""
+        if not self.entities_path:
+            return False
+        try:
+            mtime = os.path.getmtime(self.entities_path)
+        except OSError:
+            return False
+        if mtime == self.entities_mtime:
+            return False
+        self.load_entities(self.entities_path)
+        return True
 
     def load_entities(self, path: str) -> None:
         """Load entity definitions from JSON file."""
         try:
             with open(path, "r") as f:
                 data = json.load(f)
+            try:
+                self.entities_mtime = os.path.getmtime(path)
+            except OSError:
+                self.entities_mtime = 0.0
+            self.entities_path = path
+            # Reset accumulators so we don't keep stale rooms/entities from a
+            # prior load if names/areas were removed in HA.
+            self.entity_names = []
+            self.room_names = []
+            self.friendly_to_entity = {}
+            self.room_to_entities = {}
 
             self.entities = data
 
@@ -107,6 +135,9 @@ class IntentParser:
         """Normalize text for matching."""
         # Lowercase and strip
         text = text.lower().strip()
+        # Strip punctuation so e.g. "living room." matches the "living room"
+        # area instead of falling through to fuzzy entity matching.
+        text = re.sub(r"[,\.;:!?]", "", text)
         # Remove extra whitespace
         text = re.sub(r"\s+", " ", text)
         # Remove common filler words at start

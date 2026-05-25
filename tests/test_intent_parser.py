@@ -133,6 +133,20 @@ class TestIntentParserTurnOn:
         assert "light.dresser_lamp" in intent.targets
         assert len(intent.targets) == 2
 
+    def test_turn_on_room_with_trailing_punctuation(self, intent_parser):
+        """Whisper often appends '.' or '?'; that must not flip a room into
+        a fuzzy entity match (which used to grab the tolomeo)."""
+        for text in (
+            "Turn on the living room.",
+            "Turn on the living room?",
+            "Turn on the living room,",
+        ):
+            intent = intent_parser.parse(text)
+            assert intent.intent == IntentType.TURN_ON, text
+            assert intent.target_type == "room", f"{text!r} -> {intent.target_type}"
+            assert "light.artemide_tolomeo_mega_living_room_floor_lamp" in intent.targets
+            assert "light.dresser_lamp" in intent.targets
+
     def test_turn_on_kitchen(self, intent_parser):
         """Test: 'Turn on the kitchen' -> turns on kitchen light"""
         intent = intent_parser.parse("Turn on the kitchen")

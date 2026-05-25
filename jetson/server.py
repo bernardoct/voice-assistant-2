@@ -175,6 +175,21 @@ class VoiceAssistantServer:
     ) -> None:
         """Process audio buffer and send results."""
         try:
+            # Pick up entity-cache updates pushed by the per-minute HA sync
+            # cron without restarting the server. Hotwords get refreshed too
+            # so newly-added device names bias Whisper correctly.
+            if self.intent_parser.maybe_reload():
+                logger.info(
+                    "ha_entities.json changed -- refreshed intent parser (%d entities, %d rooms)",
+                    len(self.intent_parser.entity_names),
+                    len(self.intent_parser.room_names),
+                )
+                if self.entities_path:
+                    try:
+                        self.transcriber.load_hotwords_from_entities(self.entities_path)
+                    except Exception as e:
+                        logger.warning("Failed to refresh hotwords: %s", e)
+
             # Combine audio chunks
             combined = b"".join(audio_chunks)
 
