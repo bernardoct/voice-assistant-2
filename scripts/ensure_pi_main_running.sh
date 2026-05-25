@@ -10,7 +10,7 @@
 set -e
 
 PROJECT_DIR="/home/bernardoct/voice-assistant-2"
-PYTHON_BIN="${PROJECT_DIR}/venv/bin/python"
+PYTHON_BIN="${PROJECT_DIR}/.venv/bin/python"
 LOG_FILE="/var/log/pi_main_watchdog.log"
 
 # Function to log messages with timestamps

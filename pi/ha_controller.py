@@ -1,10 +1,9 @@
-"""
-Home Assistant controller for light and switch control.
-"""
+"""Home Assistant REST API client for executing parsed intents."""
 
 import asyncio
 import json
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -15,9 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class HomeAssistantController:
-    """
-    Controller for Home Assistant light and switch entities.
-    """
+    """Calls Home Assistant services and resolves entities/rooms from the cache."""
 
     def __init__(
         self,
@@ -25,265 +22,162 @@ class HomeAssistantController:
         token: str = config.HA_TOKEN,
         entities_path: str = config.HA_ENTITIES_PATH,
     ):
+        if not token:
+            raise ValueError("HA_TOKEN is required (set in .env or environment)")
         self.url = url.rstrip("/")
         self.token = token
         self.entities_path = entities_path
 
         self._session: Optional[aiohttp.ClientSession] = None
-        self._entities: Dict[str, Any] = {}
-        self._entity_info: Dict[str, Dict] = {}
+        self._entity_info: Dict[str, Dict[str, Any]] = {}
         self._room_to_entities: Dict[str, List[str]] = {}
+        self._entities_mtime: float = 0.0
 
     async def connect(self) -> None:
-        """Initialize connection and load entities."""
         self._session = aiohttp.ClientSession(
             headers={
                 "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json",
-            }
+            },
+            timeout=aiohttp.ClientTimeout(total=10),
         )
-
-        # Load entity definitions
-        await self._load_entities()
-
-        logger.info(f"Connected to Home Assistant at {self.url}")
+        self._reload_entities()
+        logger.info("Home Assistant client ready at %s", self.url)
 
     async def disconnect(self) -> None:
-        """Close connection."""
-        if self._session:
+        if self._session is not None:
             await self._session.close()
             self._session = None
 
-    async def _load_entities(self) -> None:
-        """Load entity definitions from cache file."""
+    def _reload_entities(self) -> None:
+        """(Re)load the entities JSON if its mtime has changed."""
         try:
-            with open(self.entities_path, "r") as f:
-                self._entities = json.load(f)
+            mtime = os.path.getmtime(self.entities_path)
+        except OSError as e:
+            logger.warning("Cannot stat entities file %s: %s", self.entities_path, e)
+            return
 
-            # Build entity info lookup
-            for entity in self._entities.get("entities", []):
-                entity_id = entity.get("entity_id")
-                if entity_id:
-                    self._entity_info[entity_id] = entity
+        if mtime == self._entities_mtime and self._entity_info:
+            return
 
-            # Build room to entities mapping
-            for area in self._entities.get("areas", []):
-                room_name = area.get("name_norm", area.get("name", ""))
-                entities = area.get("light_entities", [])
-                if room_name:
-                    self._room_to_entities[room_name] = entities
-
-            logger.info(
-                f"Loaded {len(self._entity_info)} entities, "
-                f"{len(self._room_to_entities)} rooms"
-            )
-
+        try:
+            with open(self.entities_path) as f:
+                data = json.load(f)
         except Exception as e:
-            logger.error(f"Failed to load entities: {e}")
+            logger.error("Failed to read %s: %s", self.entities_path, e)
+            return
+
+        info: Dict[str, Dict[str, Any]] = {}
+        for ent in data.get("entities", []):
+            eid = ent.get("entity_id")
+            if eid:
+                info[eid] = ent
+
+        rooms: Dict[str, List[str]] = {}
+        for area in data.get("areas", []):
+            name = (area.get("name_norm") or area.get("name") or "").lower()
+            ents = area.get("light_entities", [])
+            if name:
+                rooms[name] = ents
+
+        self._entity_info = info
+        self._room_to_entities = rooms
+        self._entities_mtime = mtime
+        logger.info(
+            "Loaded %d entities and %d rooms from %s",
+            len(info), len(rooms), self.entities_path,
+        )
+
+    def _supports_brightness(self, entity_id: str) -> bool:
+        modes = self._entity_info.get(entity_id, {}).get("supported_color_modes") or []
+        return "brightness" in modes or "color_temp_kelvin" in modes
+
+    @staticmethod
+    def _domain(entity_id: str) -> str:
+        return entity_id.split(".", 1)[0]
 
     async def _call_service(
         self,
         domain: str,
         service: str,
         entity_id: str,
-        data: Optional[Dict] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        """
-        Call a Home Assistant service.
-
-        Args:
-            domain: Service domain (light, switch)
-            service: Service name (turn_on, turn_off, toggle)
-            entity_id: Entity to control
-            data: Additional service data
-
-        Returns:
-            True if successful
-        """
-        if not self._session:
-            logger.error("Not connected to Home Assistant")
+        if self._session is None:
+            logger.error("HA session not initialized")
             return False
-
+        payload: Dict[str, Any] = {"entity_id": entity_id}
+        if extra:
+            payload.update(extra)
         url = f"{self.url}/api/services/{domain}/{service}"
-        payload = {"entity_id": entity_id}
-        if data:
-            payload.update(data)
-
         try:
             async with self._session.post(url, json=payload) as resp:
                 if resp.status == 200:
-                    logger.debug(f"Service call successful: {domain}.{service} -> {entity_id}")
+                    logger.debug("HA %s.%s -> %s OK", domain, service, entity_id)
                     return True
-                else:
-                    text = await resp.text()
-                    logger.error(
-                        f"Service call failed: {resp.status} - {text}"
-                    )
-                    return False
-
+                body = await resp.text()
+                logger.error("HA %s.%s -> %s failed (%d): %s",
+                             domain, service, entity_id, resp.status, body[:200])
+                return False
         except Exception as e:
-            logger.error(f"Error calling service: {e}")
+            logger.error("HA service call error: %s", e)
             return False
 
-    def _get_domain(self, entity_id: str) -> str:
-        """Get domain from entity ID."""
-        return entity_id.split(".")[0]
-
-    def supports_brightness(self, entity_id: str) -> bool:
-        """Check if entity supports brightness control."""
-        info = self._entity_info.get(entity_id, {})
-        modes = info.get("supported_color_modes") or []
-        return "brightness" in modes or "color_temp_kelvin" in modes
-
-    async def turn_on(
-        self,
-        entity_id: str,
-        brightness_pct: Optional[int] = None,
-    ) -> bool:
-        """
-        Turn on an entity.
-
-        Args:
-            entity_id: Entity to turn on
-            brightness_pct: Optional brightness (0-100)
-
-        Returns:
-            True if successful
-        """
-        domain = self._get_domain(entity_id)
-        data = {}
-
-        if brightness_pct is not None and self.supports_brightness(entity_id):
-            # Convert percentage to 0-255 range
-            data["brightness"] = int(brightness_pct * 255 / 100)
-
-        return await self._call_service(domain, "turn_on", entity_id, data)
+    async def turn_on(self, entity_id: str, brightness_pct: Optional[int] = None) -> bool:
+        extra: Dict[str, Any] = {}
+        if brightness_pct is not None and self._supports_brightness(entity_id):
+            extra["brightness_pct"] = max(0, min(100, brightness_pct))
+        return await self._call_service(self._domain(entity_id), "turn_on", entity_id, extra)
 
     async def turn_off(self, entity_id: str) -> bool:
-        """Turn off an entity."""
-        domain = self._get_domain(entity_id)
-        return await self._call_service(domain, "turn_off", entity_id)
+        return await self._call_service(self._domain(entity_id), "turn_off", entity_id)
 
     async def toggle(self, entity_id: str) -> bool:
-        """Toggle an entity."""
-        domain = self._get_domain(entity_id)
-        return await self._call_service(domain, "toggle", entity_id)
+        return await self._call_service(self._domain(entity_id), "toggle", entity_id)
 
     async def set_brightness(self, entity_id: str, brightness_pct: int) -> bool:
-        """
-        Set brightness of a light.
-
-        Args:
-            entity_id: Light entity
-            brightness_pct: Brightness (0-100)
-
-        Returns:
-            True if successful
-        """
-        if not self.supports_brightness(entity_id):
-            logger.warning(f"Entity {entity_id} doesn't support brightness")
-            # Just turn on/off based on brightness value
-            if brightness_pct > 0:
-                return await self.turn_on(entity_id)
-            else:
-                return await self.turn_off(entity_id)
-
+        brightness_pct = max(0, min(100, brightness_pct))
+        if not self._supports_brightness(entity_id):
+            # Plain on/off device: emulate by turning on/off.
+            return await (
+                self.turn_on(entity_id) if brightness_pct > 0 else self.turn_off(entity_id)
+            )
         return await self.turn_on(entity_id, brightness_pct)
 
-    async def turn_on_room(
-        self,
-        room: str,
-        brightness_pct: Optional[int] = None,
-    ) -> List[bool]:
+    async def execute_intent(self, intent) -> bool:
+        """Dispatch an IntentMessage to the right HA service call(s).
+
+        Returns True if every targeted entity reported success.
         """
-        Turn on all lights in a room.
+        # Pick up entity file changes (the cron updates it).
+        self._reload_entities()
 
-        Args:
-            room: Room name
-            brightness_pct: Optional brightness
+        if not intent.targets:
+            logger.warning("Intent has no targets: %s", intent)
+            return False
 
-        Returns:
-            List of success results for each entity
-        """
-        entities = self._room_to_entities.get(room, [])
-        if not entities:
-            logger.warning(f"No entities found for room: {room}")
-            return []
+        logger.info(
+            "Executing intent=%s targets=%s brightness=%s",
+            intent.intent, intent.targets, intent.brightness,
+        )
 
-        logger.info(f"Turning on {len(entities)} lights in {room}")
-        tasks = [self.turn_on(e, brightness_pct) for e in entities]
-        return await asyncio.gather(*tasks)
+        if intent.intent == "turn_on":
+            ops = [self.turn_on(e, intent.brightness) for e in intent.targets]
+        elif intent.intent == "turn_off":
+            ops = [self.turn_off(e) for e in intent.targets]
+        elif intent.intent == "toggle":
+            ops = [self.toggle(e) for e in intent.targets]
+        elif intent.intent == "set_brightness":
+            if intent.brightness is None:
+                logger.warning("set_brightness intent missing brightness")
+                return False
+            ops = [self.set_brightness(e, intent.brightness) for e in intent.targets]
+        else:
+            logger.warning("Unhandled intent type: %s", intent.intent)
+            return False
 
-    async def turn_off_room(self, room: str) -> List[bool]:
-        """Turn off all lights in a room."""
-        entities = self._room_to_entities.get(room, [])
-        if not entities:
-            logger.warning(f"No entities found for room: {room}")
-            return []
-
-        logger.info(f"Turning off {len(entities)} lights in {room}")
-        tasks = [self.turn_off(e) for e in entities]
-        return await asyncio.gather(*tasks)
-
-    async def set_room_brightness(
-        self,
-        room: str,
-        brightness_pct: int,
-    ) -> List[bool]:
-        """Set brightness for all lights in a room."""
-        entities = self._room_to_entities.get(room, [])
-        if not entities:
-            logger.warning(f"No entities found for room: {room}")
-            return []
-
-        logger.info(f"Setting brightness to {brightness_pct}% for {len(entities)} lights in {room}")
-        tasks = [self.set_brightness(e, brightness_pct) for e in entities]
-        return await asyncio.gather(*tasks)
-
-    async def get_state(self, entity_id: str) -> Optional[Dict]:
-        """Get current state of an entity."""
-        if not self._session:
-            return None
-
-        url = f"{self.url}/api/states/{entity_id}"
-
-        try:
-            async with self._session.get(url) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                return None
-        except Exception as e:
-            logger.error(f"Error getting state: {e}")
-            return None
-
-    def get_room_entities(self, room: str) -> List[str]:
-        """Get list of entities in a room."""
-        return self._room_to_entities.get(room, [])
-
-    def get_rooms(self) -> List[str]:
-        """Get list of available rooms."""
-        return list(self._room_to_entities.keys())
-
-    def find_entity_by_name(self, name: str) -> Optional[str]:
-        """Find entity ID by friendly name."""
-        name_lower = name.lower()
-
-        # Check friendly name index
-        index = self._entities.get("index", {}).get("by_friendly_norm", {})
-        if name_lower in index:
-            entities = index[name_lower]
-            # Prefer light entities
-            for e in entities:
-                if e.startswith("light."):
-                    return e
-            return entities[0] if entities else None
-
-        # Partial match
-        for friendly, entities in index.items():
-            if name_lower in friendly or friendly in name_lower:
-                for e in entities:
-                    if e.startswith("light."):
-                        return e
-                return entities[0] if entities else None
-
-        return None
+        results = await asyncio.gather(*ops, return_exceptions=True)
+        ok = all(r is True for r in results)
+        if not ok:
+            logger.warning("Some HA calls failed: %s", results)
+        return ok

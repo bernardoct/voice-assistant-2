@@ -10,6 +10,11 @@ pyaudio>=0.2.13
 # Voice Activity Detection
 webrtcvad>=2.0.10
 
+# Wake word detection
+openwakeword>=0.6.0
+# ONNX runtime backend for openwakeword (lighter than tflite on Pi)
+onnxruntime>=1.16.0
+
 # HTTP client for Home Assistant
 aiohttp>=3.9.0
 

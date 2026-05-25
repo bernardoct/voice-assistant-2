@@ -5,17 +5,24 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Run Pi",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "pi.main",
+            "python": "${workspaceFolder}/.venv/bin/python",
+            "cwd": "${workspaceFolder}"
+        },
+        {
             "name": "Python Debugger: Run Jetson",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/run_jetson.py",
-            "args": ["--entities", "/home/bernardoct/ha_entities.json", "--model", "base.en"]
-        },
-        {
-            "name": "Python Debugger: Run Pi",
-            "type": "debugpy",
-            "request": "launch",
-            "module": "pi.main"
+            "args": [
+                "--entities",
+                "/home/bernardoct/ha_entities.json",
+                "--model",
+                "base.en"
+            ]
         }
     ]
 }

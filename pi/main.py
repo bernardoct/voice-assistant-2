@@ -1,369 +1,176 @@
 #!/usr/bin/env python3
-"""
-Main voice assistant application for Raspberry Pi.
-Captures voice commands and controls Home Assistant entities.
+"""Raspberry Pi voice assistant entry point.
+
+Pipeline:
+  1. Continuously read 80 ms audio frames from the mic.
+  2. Feed each frame to the wake-word detector.
+  3. On wake: play a chime, switch to VAD-driven utterance capture.
+  4. Send the captured utterance to the Jetson, await intents.
+  5. Execute each intent via the Home Assistant REST API.
+  6. Play success/error/unknown chime, reset, return to step 2.
 """
 
-import asyncio
 import argparse
+import asyncio
 import logging
-import os
 import signal
 import sys
-import time
-import wave
-from typing import Optional
 
 from . import config
-from .audio_capture import AudioCapture, ContinuousAudioCapture
+from .audio_capture import AudioStream, UtteranceRecorder
+from .feedback import AudioFeedback
 from .ha_controller import HomeAssistantController
 from .jetson_client import JetsonClient
-from .feedback import AudioFeedback
-from shared.protocol import IntentType, IntentMessage
+from .wake_word import WakeWordDetector
+from shared.protocol import IntentType
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("pi.main")
 
 
 class VoiceAssistant:
-    """
-    Main voice assistant application.
-    Coordinates audio capture, transcription, and Home Assistant control.
-    """
+    def __init__(self, args: argparse.Namespace):
+        self.audio = AudioStream(device_index=args.input_device)
+        self.wake = WakeWordDetector(
+            model_name=args.wake_model,
+            threshold=args.wake_threshold,
+        )
+        self.recorder = UtteranceRecorder()
+        self.jetson = JetsonClient(url=f"ws://{args.jetson_host}:{args.jetson_port}")
+        self.ha = HomeAssistantController(
+            url=args.ha_url,
+            token=args.ha_token,
+            entities_path=args.entities,
+        )
+        self.feedback = AudioFeedback(enabled=not args.no_feedback)
+        self._stop = asyncio.Event()
 
-    def __init__(
-        self,
-        jetson_url: str = config.JETSON_URL,
-        ha_url: str = config.HA_URL,
-        ha_token: str = config.HA_TOKEN,
-        entities_path: str = config.HA_ENTITIES_PATH,
-        enable_feedback: bool = config.ENABLE_AUDIO_FEEDBACK,
-    ):
-        self.audio_capture = AudioCapture()
-        self.continuous_capture = ContinuousAudioCapture(self.audio_capture)
-        self.jetson_client = JetsonClient(jetson_url)
-        self.ha_controller = HomeAssistantController(ha_url, ha_token, entities_path)
-        self.feedback = AudioFeedback() if enable_feedback else None
-
-        self._running = False
-        self._processing = False
+    def request_stop(self) -> None:
+        self._stop.set()
 
     async def start(self) -> None:
-        """Start the voice assistant."""
-        logger.info("Starting voice assistant...")
+        await self.ha.connect()
+        # Best-effort Jetson connect now so the first command isn't slow.
+        await self.jetson.connect()
+        self.audio.start()
 
-        # Connect to services
-        await self.ha_controller.connect()
+    async def shutdown(self) -> None:
+        self.audio.stop()
+        await self.jetson.disconnect()
+        await self.ha.disconnect()
+        self.feedback.cleanup()
 
-        if not await self.jetson_client.connect():
-            logger.error("Failed to connect to Jetson server")
-            # Continue anyway, will retry on each request
+    async def _capture_utterance(self) -> bytes:
+        """Block until the user finishes speaking or we time out. Returns PCM bytes."""
+        self.recorder.reset()
+        while not self.recorder.done and not self._stop.is_set():
+            frame = await self.audio.read_frame()
+            self.recorder.feed(frame)
+        return self.recorder.get_audio()
 
-        self._running = True
-        logger.info("Voice assistant started")
+    async def _handle_command(self) -> None:
+        await self.feedback.listening()
+        logger.info("Wake word detected -- capturing command...")
+        audio = await self._capture_utterance()
 
-    async def stop(self) -> None:
-        """Stop the voice assistant."""
-        logger.info("Stopping voice assistant...")
-        self._running = False
-
-        self.continuous_capture.stop()
-        await self.jetson_client.disconnect()
-        await self.ha_controller.disconnect()
-
-        if self.feedback:
-            self.feedback.cleanup()
-
-        logger.info("Voice assistant stopped")
-
-    async def _execute_intent(self, intent: IntentMessage) -> bool:
-        """
-        Execute a parsed intent.
-
-        Args:
-            intent: Parsed intent message
-
-        Returns:
-            True if executed successfully
-        """
-        logger.info(
-            f"Executing intent: {intent.intent} -> {intent.targets} "
-            f"(type: {intent.target_type}, brightness: {intent.brightness})"
-        )
-
-        if not intent.targets:
-            logger.warning("No targets specified in intent")
-            return False
-
-        success = True
-
-        try:
-            if intent.intent == IntentType.TURN_ON:
-                if intent.target_type == "room":
-                    # Turn on room
-                    room = self._find_room_from_entities(intent.targets)
-                    if room:
-                        results = await self.ha_controller.turn_on_room(
-                            room, intent.brightness
-                        )
-                        success = all(results) if results else False
-                    else:
-                        # Turn on individual entities
-                        for entity in intent.targets:
-                            result = await self.ha_controller.turn_on(
-                                entity, intent.brightness
-                            )
-                            success = success and result
-                else:
-                    # Turn on individual entities
-                    for entity in intent.targets:
-                        result = await self.ha_controller.turn_on(
-                            entity, intent.brightness
-                        )
-                        success = success and result
-
-            elif intent.intent == IntentType.TURN_OFF:
-                if intent.target_type == "room":
-                    room = self._find_room_from_entities(intent.targets)
-                    if room:
-                        results = await self.ha_controller.turn_off_room(room)
-                        success = all(results) if results else False
-                    else:
-                        for entity in intent.targets:
-                            result = await self.ha_controller.turn_off(entity)
-                            success = success and result
-                else:
-                    for entity in intent.targets:
-                        result = await self.ha_controller.turn_off(entity)
-                        success = success and result
-
-            elif intent.intent == IntentType.SET_BRIGHTNESS:
-                if intent.brightness is None:
-                    logger.warning("No brightness value specified")
-                    return False
-
-                if intent.target_type == "room":
-                    room = self._find_room_from_entities(intent.targets)
-                    if room:
-                        results = await self.ha_controller.set_room_brightness(
-                            room, intent.brightness
-                        )
-                        success = all(results) if results else False
-                    else:
-                        for entity in intent.targets:
-                            result = await self.ha_controller.set_brightness(
-                                entity, intent.brightness
-                            )
-                            success = success and result
-                else:
-                    for entity in intent.targets:
-                        result = await self.ha_controller.set_brightness(
-                            entity, intent.brightness
-                        )
-                        success = success and result
-
-            elif intent.intent == IntentType.TOGGLE:
-                for entity in intent.targets:
-                    result = await self.ha_controller.toggle(entity)
-                    success = success and result
-
-            else:
-                logger.warning(f"Unknown intent type: {intent.intent}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Error executing intent: {e}")
-            return False
-
-        return success
-
-    def _find_room_from_entities(self, entities: list) -> Optional[str]:
-        """Find room name from entity list."""
-        for room, room_entities in self.ha_controller._room_to_entities.items():
-            if set(entities) == set(room_entities):
-                return room
-            # Also check if entities are a subset of room entities
-            if set(entities).issubset(set(room_entities)) and len(entities) > 0:
-                return room
-        return None
-
-    async def _on_speech_start(self) -> None:
-        """Called when speech is detected."""
-        logger.debug("Speech detected")
-        if self.feedback:
-            await self.feedback.play_listening_start()
-
-    async def _on_speech_end(self) -> None:
-        """Called when speech ends."""
-        logger.debug("Speech ended")
-        if self.feedback:
-            await self.feedback.play_listening_end()
-
-    async def _process_speech(self, audio_data: bytes) -> None:
-        """
-        Process captured speech.
-
-        Args:
-            audio_data: Raw audio bytes
-        """
-        if self._processing:
-            logger.debug("Already processing, skipping")
+        if self.recorder.timed_out or not audio:
+            logger.info("No speech captured after wake; ignoring.")
+            await self.feedback.unknown()
             return
 
-        self._processing = True
+        transcription, intents = await self.jetson.process_audio(
+            audio, sample_rate=self.audio.sample_rate
+        )
+        if transcription is not None:
+            logger.info("Transcription: %r", transcription)
 
-        # # Save audio to WAV file for debugging before sending to Jetson
-        # try:
-        #     debug_dir = os.path.join(os.path.dirname(__file__), "..", "debug_audio")
-        #     os.makedirs(debug_dir, exist_ok=True)
-        #     wav_path = os.path.join(debug_dir, f"sent_{time.strftime('%Y%m%d_%H%M%S')}.wav")
-        #     with wave.open(wav_path, "wb") as wf:
-        #         wf.setnchannels(config.CHANNELS)
-        #         wf.setsampwidth(2)  # 16-bit PCM = 2 bytes
-        #         wf.setframerate(config.SAMPLE_RATE)
-        #         wf.writeframes(audio_data)
-        #     logger.info(f"Saved audio to {wav_path} ({len(audio_data)} bytes)")
-        # except Exception as e:
-        #     logger.warning(f"Failed to save debug audio: {e}")
+        if not intents:
+            logger.info("Jetson returned no intents")
+            await self.feedback.unknown()
+            return
 
-        try:
-            # Send to Jetson for transcription and intent parsing
-            # May return multiple intents for chained commands
-            transcription, intents = await self.jetson_client.process_audio(
-                audio_data, config.SAMPLE_RATE
-            )
+        any_executed = False
+        all_ok = True
+        for intent in intents:
+            if intent.intent == IntentType.UNKNOWN:
+                logger.info("Unknown intent: %r", intent.original_text)
+                continue
+            any_executed = True
+            ok = await self.ha.execute_intent(intent)
+            all_ok = all_ok and ok
 
-            if transcription:
-                logger.info(f"Transcription: {transcription}")
-
-            if not intents:
-                logger.info("No intents parsed")
-                if self.feedback:
-                    await self.feedback.play_unknown()
-                return
-
-            # Execute all intents
-            all_success = True
-            has_valid_intent = False
-
-            for intent in intents:
-                if intent.intent != IntentType.UNKNOWN:
-                    has_valid_intent = True
-                    success = await self._execute_intent(intent)
-                    all_success = all_success and success
-                else:
-                    logger.info(f"Unknown command: {intent.original_text}")
-
-            # Play feedback based on overall result
-            if self.feedback:
-                if has_valid_intent:
-                    if all_success:
-                        await self.feedback.play_success()
-                    else:
-                        await self.feedback.play_error()
-                else:
-                    await self.feedback.play_unknown()
-
-        except Exception as e:
-            logger.error(f"Error processing speech: {e}")
-            if self.feedback:
-                await self.feedback.play_error()
-
-        finally:
-            self._processing = False
+        if not any_executed:
+            await self.feedback.unknown()
+        elif all_ok:
+            await self.feedback.success()
+        else:
+            await self.feedback.error()
 
     async def run(self) -> None:
-        """Main run loop."""
         await self.start()
-
-        logger.info("Listening for voice commands... (Press Ctrl+C to stop)")
-
+        logger.info(
+            "Listening for wake word '%s' (Ctrl+C to stop)...",
+            self.wake.model_name,
+        )
         try:
-            async for audio_segment in self.continuous_capture.run(
-                on_speech_start=lambda: asyncio.create_task(self._on_speech_start()),
-                on_speech_end=lambda: asyncio.create_task(self._on_speech_end()),
-            ):
-                if not self._running:
-                    break
-
-                # Process the speech segment
-                await self._process_speech(audio_segment)
-
+            while not self._stop.is_set():
+                frame = await self.audio.read_frame()
+                if self.wake.detect(frame) is None:
+                    continue
+                try:
+                    await self._handle_command()
+                finally:
+                    # Always clear the wake detector's internal state so the
+                    # tail of the user's speech doesn't bleed into the next
+                    # detection window.
+                    self.wake.reset()
         except asyncio.CancelledError:
             pass
         finally:
-            await self.stop()
+            await self.shutdown()
 
 
-async def main():
-    """Main entry point."""
-    parser = argparse.ArgumentParser(description="Voice Assistant for Home Assistant")
-    parser.add_argument(
-        "--jetson-host",
-        default=config.JETSON_HOST,
-        help="Jetson server hostname/IP",
-    )
-    parser.add_argument(
-        "--jetson-port",
-        type=int,
-        default=config.JETSON_PORT,
-        help="Jetson server port",
-    )
-    parser.add_argument(
-        "--ha-url",
-        default=config.HA_URL,
-        help="Home Assistant URL",
-    )
-    parser.add_argument(
-        "--ha-token",
-        default=config.HA_TOKEN,
-        help="Home Assistant long-lived access token",
-    )
-    parser.add_argument(
-        "--entities",
-        default=config.HA_ENTITIES_PATH,
-        help="Path to ha_entities.json",
-    )
-    parser.add_argument(
-        "--no-feedback",
-        action="store_true",
-        help="Disable audio feedback",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug logging",
-    )
+def _parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Raspberry Pi voice assistant")
+    p.add_argument("--jetson-host", default=config.JETSON_HOST)
+    p.add_argument("--jetson-port", type=int, default=config.JETSON_PORT)
+    p.add_argument("--ha-url", default=config.HA_URL)
+    p.add_argument("--ha-token", default=config.HA_TOKEN)
+    p.add_argument("--entities", default=config.HA_ENTITIES_PATH)
+    p.add_argument("--wake-model", default=config.WAKE_MODEL,
+                   help="openwakeword model (alexa, hey_jarvis, hey_mycroft, hey_rhasspy)")
+    p.add_argument("--wake-threshold", type=float, default=config.WAKE_THRESHOLD)
+    p.add_argument("--input-device", type=int, default=config.INPUT_DEVICE_INDEX,
+                   help="PyAudio input device index (default: system default)")
+    p.add_argument("--no-feedback", action="store_true",
+                   help="Disable audio chimes")
+    p.add_argument("--debug", action="store_true")
+    return p.parse_args()
 
-    args = parser.parse_args()
 
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
+async def main() -> None:
+    args = _parse_args()
 
-    jetson_url = f"ws://{args.jetson_host}:{args.jetson_port}"
-
-    # Create and run assistant
-    assistant = VoiceAssistant(
-        jetson_url=jetson_url,
-        ha_url=args.ha_url,
-        ha_token=args.ha_token,
-        entities_path=args.entities,
-        enable_feedback=not args.no_feedback,
+    logging.basicConfig(
+        level=logging.DEBUG if args.debug else getattr(logging, config.LOG_LEVEL, logging.INFO),
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
     )
+    # openwakeword and pyaudio are chatty at DEBUG; tame them.
+    logging.getLogger("openwakeword").setLevel(logging.INFO)
 
-    # Handle shutdown
+    if not args.ha_token:
+        logger.error("HA_TOKEN is required (set in .env or via --ha-token)")
+        sys.exit(1)
+
+    assistant = VoiceAssistant(args)
+
     loop = asyncio.get_event_loop()
-
-    def signal_handler():
-        logger.info("Shutdown signal received")
-        loop.create_task(assistant.stop())
-
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, signal_handler)
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, assistant.request_stop)
+        except NotImplementedError:
+            pass  # Windows or limited environments.
 
     await assistant.run()
 
